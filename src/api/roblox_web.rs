@@ -1,40 +1,12 @@
-use std::{
-    borrow::Cow,
-    fmt::{self, Write},
-};
+use crate::api::{ImageUploadData, RawUploadResponse, UploadResponse};
+use std::fmt::{self, Write};
 
 use reqwest::{
     header::{HeaderValue, COOKIE},
     Client, Request, Response, StatusCode,
 };
-use serde::{Deserialize, Serialize};
-use thiserror::Error;
 
-#[derive(Debug, Clone)]
-pub struct ImageUploadData<'a> {
-    pub image_data: Cow<'a, [u8]>,
-    pub name: &'a str,
-    pub description: &'a str,
-    pub group_id: Option<u64>,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-#[serde(rename_all = "PascalCase")]
-pub struct UploadResponse {
-    pub asset_id: u64,
-    pub backing_asset_id: u64,
-}
-
-/// Internal representation of what the asset upload endpoint returns, before
-/// we've handled any errors.
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "PascalCase")]
-struct RawUploadResponse {
-    success: bool,
-    message: Option<String>,
-    asset_id: Option<u64>,
-    backing_asset_id: Option<u64>,
-}
+use super::{Api, RobloxApiError};
 
 pub struct RobloxApiClient {
     auth_token: Option<String>,
@@ -48,16 +20,8 @@ impl fmt::Debug for RobloxApiClient {
     }
 }
 
-impl RobloxApiClient {
-    pub fn new(auth_token: Option<String>) -> Self {
-        Self {
-            auth_token,
-            csrf_token: None,
-            client: Client::new(),
-        }
-    }
-
-    pub fn download_image(&mut self, id: u64) -> Result<Vec<u8>, RobloxApiError> {
+impl Api for RobloxApiClient {
+    fn download_image(&mut self, id: u64) -> Result<Vec<u8>, RobloxApiError> {
         let url = format!("https://roblox.com/asset?id={}", id);
 
         let mut response =
@@ -69,10 +33,7 @@ impl RobloxApiClient {
         Ok(buffer)
     }
 
-    /// Upload an image, retrying if the asset endpoint determines that the
-    /// asset's name is inappropriate. The asset's name will be replaced with a
-    /// generic known-good string.
-    pub fn upload_image_with_moderation_retry(
+    fn upload_image_with_moderation_retry(
         &mut self,
         data: ImageUploadData,
     ) -> Result<UploadResponse, RobloxApiError> {
@@ -115,11 +76,7 @@ impl RobloxApiClient {
         }
     }
 
-    /// Upload an image, returning an error if anything goes wrong.
-    pub fn upload_image(
-        &mut self,
-        data: ImageUploadData,
-    ) -> Result<UploadResponse, RobloxApiError> {
+    fn upload_image(&mut self, data: ImageUploadData) -> Result<UploadResponse, RobloxApiError> {
         let response = self.upload_image_raw(&data)?;
 
         // Some other errors will be reported inside the response, even
@@ -138,40 +95,14 @@ impl RobloxApiClient {
             Err(RobloxApiError::ApiError { message })
         }
     }
+}
 
-    /// Upload an image, returning the raw response returned by the endpoint,
-    /// which may have further failures to handle.
-    fn upload_image_raw(
-        &mut self,
-        data: &ImageUploadData,
-    ) -> Result<RawUploadResponse, RobloxApiError> {
-        let mut url = "https://data.roblox.com/data/upload/json?assetTypeId=13".to_owned();
-
-        if let Some(group_id) = data.group_id {
-            write!(url, "&groupId={}", group_id).unwrap();
-        }
-
-        let mut response = self.execute_with_csrf_retry(|client| {
-            Ok(client
-                .post(&url)
-                .query(&[("name", data.name), ("description", data.description)])
-                .body(data.image_data.clone().into_owned())
-                .build()?)
-        })?;
-
-        let body = response.text()?;
-
-        // Some errors will be reported through HTTP status codes, handled here.
-        if response.status().is_success() {
-            match serde_json::from_str(&body) {
-                Ok(response) => Ok(response),
-                Err(source) => Err(RobloxApiError::BadResponseJson { body, source }),
-            }
-        } else {
-            Err(RobloxApiError::ResponseError {
-                status: response.status(),
-                body,
-            })
+impl RobloxApiClient {
+    pub fn new(auth_token: Option<String>) -> Self {
+        Self {
+            auth_token,
+            csrf_token: None,
+            client: Client::new(),
         }
     }
 
@@ -225,25 +156,40 @@ impl RobloxApiClient {
             request.headers_mut().insert("X-CSRF-Token", csrf.clone());
         }
     }
-}
 
-#[derive(Debug, Error)]
-pub enum RobloxApiError {
-    #[error("Roblox API HTTP error")]
-    Http {
-        #[from]
-        source: reqwest::Error,
-    },
+    /// Upload an image, returning the raw response returned by the endpoint,
+    /// which may have further failures to handle.
+    fn upload_image_raw(
+        &mut self,
+        data: &ImageUploadData,
+    ) -> Result<RawUploadResponse, RobloxApiError> {
+        let mut url = "https://data.roblox.com/data/upload/json?assetTypeId=13".to_owned();
 
-    #[error("Roblox API error: {message}")]
-    ApiError { message: String },
+        if let Some(group_id) = data.group_id {
+            write!(url, "&groupId={}", group_id).unwrap();
+        }
 
-    #[error("Roblox API returned success, but had malformed JSON response: {body}")]
-    BadResponseJson {
-        body: String,
-        source: serde_json::Error,
-    },
+        let mut response = self.execute_with_csrf_retry(|client| {
+            Ok(client
+                .post(&url)
+                .query(&[("name", data.name), ("description", data.description)])
+                .body(data.image_data.clone().into_owned())
+                .build()?)
+        })?;
 
-    #[error("Roblox API returned HTTP {status} with body: {body}")]
-    ResponseError { status: StatusCode, body: String },
+        let body = response.text()?;
+
+        // Some errors will be reported through HTTP status codes, handled here.
+        if response.status().is_success() {
+            match serde_json::from_str(&body) {
+                Ok(response) => Ok(response),
+                Err(source) => Err(RobloxApiError::BadResponseJson { body, source }),
+            }
+        } else {
+            Err(RobloxApiError::ResponseError {
+                status: response.status(),
+                body,
+            })
+        }
+    }
 }

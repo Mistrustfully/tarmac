@@ -2,18 +2,20 @@ use std::collections::BTreeMap;
 use std::env;
 use std::io::{BufWriter, Write};
 
+use crate::api::Api;
+
 use fs_err as fs;
 
+use crate::api::roblox_web::RobloxApiClient;
 use crate::asset_name::AssetName;
 use crate::data::Manifest;
 use crate::options::{CreateCacheMapOptions, GlobalOptions};
-use crate::roblox_web_api::RobloxApiClient;
 
 pub fn create_cache_map(
     global: GlobalOptions,
     options: CreateCacheMapOptions,
 ) -> anyhow::Result<()> {
-    let mut api_client = RobloxApiClient::new(global.auth);
+    let mut api_client = RobloxApiClient::new(None);
 
     let project_path = match options.project_path {
         Some(path) => path.clone(),
